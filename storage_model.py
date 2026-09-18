@@ -7,7 +7,7 @@ MAX_RECORDS = 3000
 LISTS = {
     'health': ['고혈압','당뇨','고지혈증','통풍','신장질환','위장관리가 필요함'],
     'allergies': ['계란','우유','땅콩','견과류','밀','갑각류','생선','대두'],
-    'cuisines': ['한식','일식','중식','양식','분식','베이커리','디저트'],
+    'cuisines': ['한식','일식','중식','양식','분식','베이커리','디저트','기타'],
 }
 TEXTS = ('nickname','sex','goal','extra_health','extra_allergy','extra_cuisine','likes','dislikes')
 
@@ -48,7 +48,7 @@ def validate(data):
             raise ValueError('음식 기록 형식이 올바르지 않습니다.')
         item = {k: text(r.get(k,''), 200) for k in ['time','menu','action','category','meal_time']}
         for k in ['kcal','protein','sodium']:
-            item[k] = number(r.get(k,0), 0, 1_000_000)
+            item[k] = None if r.get(k) is None else number(r[k], 0, 1_000_000)
         cleaned.append(item)
     return {'format':'my-meal-bot','version':1,'profile':clean,'feedback':cleaned}
 

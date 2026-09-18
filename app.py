@@ -5,6 +5,8 @@ import re
 from datetime import datetime
 from personal_storage import storage_panel
 from storage_model import MAX_RECORDS
+from meal_planner import build_plan
+from menu_catalog import expanded_menus
 
 try:
     from openai import OpenAI
@@ -176,6 +178,9 @@ MENUS = [
     },
 ]
 
+_existing_names = {m['name'] for m in MENUS}
+MENUS.extend(m for m in expanded_menus() if m['name'] not in _existing_names)
+
 CITIES = {
     "서울": (37.5665, 126.9780),
     "부산": (35.1796, 129.0756),
@@ -189,6 +194,8 @@ CITIES = {
 }
 
 def menu_total(menu):
+    if not menu.get('items'):
+        return [None] * 6
     vals = [0] * 6
     for _, _, _, kcal, carb, protein, fat, sodium, fiber in menu["items"]:
         for i, x in enumerate([kcal, carb, protein, fat, sodium, fiber]):
@@ -256,30 +263,17 @@ def local_score(menu, profile, context):
         s += 2
     kcal, carb, protein, fat, sodium, fiber = menu_total(menu)
     health = profile.get("health", [])
-    if "고혈압" in health and sodium > 1200:
+    if "고혈압" in health and sodium is not None and sodium > 1200:
         s -= 5
-    if "당뇨" in health and carb > 80:
+    if "당뇨" in health and carb is not None and carb > 80:
         s -= 4
-    if profile.get("goal") == "체중 줄이기" and kcal > 700:
+    if profile.get("goal") == "체중 줄이기" and kcal is not None and kcal > 700:
         s -= 4
-    if protein >= 25:
+    if protein is not None and protein >= 25:
         s += 2
-    if fiber >= 5:
+    if fiber is not None and fiber >= 5:
         s += 1
     return s
-
-def fallback_recommend(profile, context):
-    menus = hard_filtered(profile)
-    ranked = sorted(menus, key=lambda m: (-local_score(m, profile, context), m["name"]))
-    result = []
-    for m in ranked[:3]:
-        result.append({
-            "name": m["name"],
-            "reason": "현재 식사시간, 선호도, 날씨와 건강 참고사항을 종합해 선택했습니다.",
-            "story": m["base_story"],
-            "story_type": m["story_type"],
-        })
-    return result
 
 def extract_json(text):
     text = text.strip()
@@ -302,6 +296,8 @@ def ai_recommend(profile, context):
         return None, "OPENAI_API_KEY가 없어 기본 추천 엔진으로 실행했습니다."
 
     candidates = hard_filtered(profile)
+    if context.get('planned_names'):
+        candidates = [m for m in candidates if m['name'] in context['planned_names']]
     if not candidates:
         return [], "알레르기 조건 때문에 추천 가능한 메뉴가 없습니다."
 
@@ -356,7 +352,7 @@ def ai_recommend(profile, context):
         valid_names = {m["name"] for m in candidates}
         clean = []
         for r in recs:
-            if r.get("name") in valid_names:
+            if isinstance(r, dict) and r.get("name") in valid_names and r.get('name') not in {x['name'] for x in clean}:
                 clean.append({
                     "name": r["name"],
                     "reason": r.get("reason", ""),
@@ -381,6 +377,14 @@ def get_menu(name):
 st.markdown("## 🍽️ My Meal Bot 1.0")
 st.caption("내 건강·취향·날씨·기분·상황을 함께 생각하는 개인 음식 추천")
 st.info("1.0은 실사용 베타입니다. 영양 수치는 참고용이며 의료 진단·치료를 대신하지 않습니다.")
+st.caption(f'등록 메뉴 {len(MENUS)}종 · 현재 추천은 기본 엔진으로 실행하며 OpenAI API를 호출하지 않습니다.')
+st.caption('새 메뉴는 일반적인 음식 아이디어이며 표준 레시피가 아닙니다. 알레르기 표시는 보수적인 참고 필터로, 실제 재료·소스·교차접촉 여부를 보장하지 않습니다. 섭취 전 반드시 확인하세요.')
+with st.expander('📚 전체 메뉴 찾아보기'):
+    catalog_category = st.selectbox('메뉴 분류', ['전체'] + sorted({m['category'] for m in MENUS}))
+    catalog_query = st.text_input('메뉴명 검색', placeholder='예: 국수, 샌드위치, 닭')
+    visible_menus = [m for m in MENUS if (catalog_category == '전체' or m['category'] == catalog_category) and catalog_query.strip() in m['name']]
+    st.caption(f'{len(visible_menus)}종 표시 · 이 검색은 목록 조회용이며 추천 조건은 내 정보에서 설정합니다.')
+    st.dataframe([{'메뉴':m['name'],'종류':m['category'],'식사 시간':', '.join(m['meal'])} for m in visible_menus], hide_index=True, use_container_width=True)
 
 tab_today, tab_profile, tab_record = st.tabs(["✨ 오늘 추천", "👤 내 정보", "📊 기록"])
 
@@ -414,7 +418,8 @@ with tab_today:
                     scope = st.radio("추천 범위", ["지금 한 끼","오늘 3끼","일주일"])
                     special = st.text_area("오늘 특별한 일", placeholder="예: 일이 잘 끝났어요, 가족과 오랜만에 만나요")
 
-            go = st.form_submit_button("✨ 오늘의 TOP 3 추천받기", type="primary", use_container_width=True)
+            st.caption('지금 한 끼: 최대 3개 후보 · 오늘 3끼: 아침/점심/저녁 · 일주일: 7일 × 3끼. 다시 누르면 가능한 대체 메뉴를 우선합니다.')
+            go = st.form_submit_button("✨ 선택한 범위로 추천 / 다시 추천", type="primary", use_container_width=True)
 
         if go:
             with st.spinner("오늘 상황과 날씨를 함께 살펴보고 있어요..."):
@@ -430,10 +435,11 @@ with tab_today:
                     "feels_like_c": weather.get("feel"),
                 }
 
-                ai_result, status = ai_recommend(p, ctx)
-                if ai_result is None:
-                    ai_result = fallback_recommend(p, ctx)
-
+                previous = st.session_state.recommendations if st.session_state.last_context.get('scope') == scope else []
+                ctx['shown_names'] = st.session_state.get('shown_menu_names', [])
+                ai_result = build_plan(p, ctx, hard_filtered(p), local_score, previous, st.session_state.feedback)
+                st.session_state.shown_menu_names = (ctx['shown_names'] + [r['name'] for r in ai_result if r['name']])[-200:]
+                status = '기본 식단 엔진: 식사 시간별 구성과 메뉴 반복을 조절했습니다.'
                 # style tuning (non-AI fallback and final display)
                 if story_style == "짧고 실용적":
                     for r in ai_result:
@@ -462,16 +468,24 @@ with tab_today:
                 st.caption("🌤️ 실시간 날씨를 불러오지 못해 기본 날씨 조건으로 추천했습니다.")
 
             st.caption(st.session_state.get("engine_status", ""))
-            st.markdown("### 오늘의 TOP 3")
+            result_scope = st.session_state.last_context.get('scope','지금 한 끼')
+            single_result = result_scope == '지금 한 끼'
+            st.markdown('### ' + ('지금 한 끼 후보' if single_result else '오늘 아침·점심·저녁 식단' if result_scope == '오늘 3끼' else '7일 식단 · 하루 3끼'))
+            if not single_result:
+                st.table([{'식사':r.get('slot',''), '메뉴':r['name'] or '추천 가능한 메뉴 없음'} for r in st.session_state.recommendations])
+                st.caption(f'등록 메뉴 {len(MENUS)}종에서 가능한 한 반복 없이 구성합니다. 제외 조건으로 후보가 적으면 반복될 수 있습니다. 날씨는 현재 날씨를 참고합니다.')
+            elif len(st.session_state.recommendations) < 3:
+                st.caption('선택한 식사 시간과 제외 조건에 맞는 메뉴만 표시합니다. 후보가 적으면 다시 추천해도 같을 수 있습니다.')
 
             view_mode = st.session_state.last_context.get("amount_view", "g + 생활계량")
 
             for i, r in enumerate(st.session_state.recommendations, 1):
                 menu = get_menu(r["name"])
                 if not menu:
+                    st.warning(f"{r.get('slot','')}: {r.get('reason','추천 가능한 메뉴가 없습니다.')}")
                     continue
                 kcal, carb, protein, fat, sodium, fiber = menu_total(menu)
-                medal = ["🥇","🥈","🥉"][i-1]
+                medal = ["🥇","🥈","🥉"][i-1] if single_result else r.get('slot',str(i))
 
                 with st.container(border=True):
                     st.markdown(f"### {medal} {menu['name']}")
@@ -481,30 +495,34 @@ with tab_today:
                     if special:
                         st.caption(f"오늘의 상황: {special}")
 
-                    with st.expander("📖 오늘의 음식 이야기", expanded=True):
+                    with st.expander("📖 오늘의 음식 이야기", expanded=single_result):
                         st.caption(r["story_type"])
                         st.write(r["story"])
                         if r["story_type"].startswith("✨"):
                             st.caption("※ 실제 역사 기록이 아닌 창작·감성 이야기입니다.")
 
-                    st.markdown("**1인 기준 양**")
-                    for name, grams, measure, *_ in menu["items"]:
-                        if view_mode == "g만 보기":
-                            st.write(f"• {name}: {grams}g")
-                        elif view_mode == "생활계량만 보기":
-                            st.write(f"• {name}: {measure}")
-                        else:
-                            st.write(f"• {name}: {grams}g · {measure}")
+                    if not menu['items']:
+                        st.caption('분량·영양정보 미등록 · 실제 레시피와 1인분 구성을 확인하세요.')
+                        st.caption('영양 수치가 없어 건강 조건에 따른 수치 비교에는 사용하지 않습니다.')
+                    else:
+                        st.markdown("**1인 기준 양**")
+                        for name, grams, measure, *_ in menu["items"]:
+                            if view_mode == "g만 보기":
+                                st.write(f"• {name}: {grams}g")
+                            elif view_mode == "생활계량만 보기":
+                                st.write(f"• {name}: {measure}")
+                            else:
+                                st.write(f"• {name}: {grams}g · {measure}")
 
-                    with st.expander("영양정보 자세히 보기"):
-                        n1,n2,n3,n4 = st.columns(4)
-                        n1.metric("열량", f"{kcal:.0f} kcal")
-                        n2.metric("탄수화물", f"{carb:.0f}g")
-                        n3.metric("단백질", f"{protein:.0f}g")
-                        n4.metric("지방", f"{fat:.0f}g")
-                        st.caption(f"나트륨 약 {sodium:.0f}mg · 식이섬유 약 {fiber:.0f}g")
-                        if "고혈압" in p.get("health",[]) and sodium > 1000:
-                            st.warning("나트륨이 높은 편일 수 있습니다. 국물·양념의 양을 줄여 드시는 편이 좋습니다.")
+                        with st.expander("영양정보 자세히 보기"):
+                            n1,n2,n3,n4 = st.columns(4)
+                            n1.metric("열량", f"{kcal:.0f} kcal")
+                            n2.metric("탄수화물", f"{carb:.0f}g")
+                            n3.metric("단백질", f"{protein:.0f}g")
+                            n4.metric("지방", f"{fat:.0f}g")
+                            st.caption(f"나트륨 약 {sodium:.0f}mg · 식이섬유 약 {fiber:.0f}g")
+                            if "고혈압" in p.get("health",[]) and sodium > 1000:
+                                st.warning("나트륨이 높은 편일 수 있습니다. 국물·양념의 양을 줄여 드시는 편이 좋습니다.")
 
                     b1,b2,b3,b4 = st.columns(4)
                     for col,label,action in [
@@ -522,13 +540,16 @@ with tab_today:
                                 "menu": menu["name"],
                                 "action": action,
                                 "category": menu["category"],
-                                "meal_time": st.session_state.last_context.get("meal_time", ""),
+                                "meal_time": r.get('meal_time',st.session_state.last_context.get("meal_time", "")),
                                 "kcal": kcal,
                                 "protein": protein,
                                 "sodium": sodium,
                             })
                             st.toast(f"{action} 기록 완료")
                             st.rerun()
+
+        elif st.session_state.last_context:
+            st.warning('현재 제외 조건과 식사 시간에 맞는 메뉴가 없습니다. 등록된 메뉴가 늘어나야 추천할 수 있습니다.')
 
 # ---------------------------------------------------------
 # Profile
@@ -562,7 +583,7 @@ with tab_profile:
             extra_allergy = st.text_input("기타 알레르기 또는 피해야 할 음식", value=st.session_state.profile.get("extra_allergy",""), placeholder="직접 입력")
 
         with st.expander("음식 취향"):
-            cuisine_opts = ["한식","일식","중식","양식","분식","베이커리","디저트"]
+            cuisine_opts = ["한식","일식","중식","양식","분식","베이커리","디저트","기타"]
             cuisines = st.multiselect("선호 음식 종류", cuisine_opts, default=st.session_state.profile.get("cuisines",["한식"]))
             extra_cuisine = st.text_input("기타 선호 음식 종류", value=st.session_state.profile.get("extra_cuisine",""), placeholder="예: 동남아 음식, 지중해식")
             likes = st.text_area("좋아하는 음식", value=st.session_state.profile.get("likes",""), placeholder="예: 고등어, 버섯, 국물요리")
@@ -596,14 +617,12 @@ with tab_record:
     st.markdown("### 내 기록")
     ate = [x for x in st.session_state.feedback if x["action"] == "먹었어요"]
     if ate:
-        avg_kcal = sum(x["kcal"] for x in ate) / len(ate)
-        avg_protein = sum(x["protein"] for x in ate) / len(ate)
-        avg_sodium = sum(x["sodium"] for x in ate) / len(ate)
         a,b,c,d = st.columns(4)
         a.metric("먹었어요", f"{len(ate)}회")
-        b.metric("평균 열량", f"{avg_kcal:.0f} kcal")
-        c.metric("평균 단백질", f"{avg_protein:.0f} g")
-        d.metric("평균 나트륨", f"{avg_sodium:.0f} mg")
+        for column, key, label, unit in [(b,'kcal','평균 열량','kcal'),(c,'protein','평균 단백질','g'),(d,'sodium','평균 나트륨','mg')]:
+            known = [x[key] for x in ate if x.get(key) is not None]
+            column.metric(label, f"{sum(known)/len(known):.0f} {unit}" if known else '정보 없음')
+        st.caption('평균은 영양 수치가 등록된 기록만 계산합니다. 미등록 메뉴를 0으로 계산하지 않습니다.')
 
     if st.session_state.feedback:
         st.markdown("**최근 기록**")
@@ -624,4 +643,4 @@ with tab_record:
     st.caption("상단의 '내 기기 저장 · 백업'에서 기기 보관과 파일 백업을 관리하세요. 브라우저 데이터 삭제 또는 다른 기기 사용 시 백업으로 복원할 수 있습니다.")
 
 st.divider()
-st.caption("My Meal Bot 1.0 · AI 추천 + 실시간 날씨 + 스토리텔링 + 생활계량 · 실사용 베타")
+st.caption("My Meal Bot · 확장 메뉴 기본 추천 · 개인 기록 · 실사용 베타")
