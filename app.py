@@ -3,6 +3,8 @@ import requests
 import json
 import re
 from datetime import datetime
+from personal_storage import storage_panel
+from storage_model import MAX_RECORDS
 
 try:
     from openai import OpenAI
@@ -23,6 +25,8 @@ for k, v in {
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
+storage_panel()
 
 # ---------------------------------------------------------
 # 실사용 베타용 메뉴 카탈로그
@@ -290,7 +294,11 @@ def extract_json(text):
         raise
 
 def ai_recommend(profile, context):
-    if OpenAI is None or "OPENAI_API_KEY" not in st.secrets:
+    try:
+        api_key = st.secrets.get("OPENAI_API_KEY", "")
+    except FileNotFoundError:
+        api_key = ""
+    if OpenAI is None or not api_key:
         return None, "OPENAI_API_KEY가 없어 기본 추천 엔진으로 실행했습니다."
 
     candidates = hard_filtered(profile)
@@ -332,7 +340,7 @@ def ai_recommend(profile, context):
     }
 
     model = st.secrets.get("OPENAI_MODEL", "gpt-5.6-luna")
-    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+    client = OpenAI(api_key=api_key)
     try:
         response = client.responses.create(
             model=model,
@@ -444,6 +452,7 @@ with tab_today:
                 st.session_state.recommendations = ai_result
                 st.session_state.last_context = ctx
                 st.session_state.engine_status = status
+                st.rerun()
 
         if st.session_state.recommendations:
             w = st.session_state.weather
@@ -505,15 +514,21 @@ with tab_today:
                         (b4,"💾 저장","저장"),
                     ]:
                         if col.button(label, key=f"{action}_{i}"):
+                            if len(st.session_state.feedback) >= MAX_RECORDS:
+                                st.warning('기록이 3,000개입니다. 백업 후 오래된 기록을 삭제하세요.')
+                                st.stop()
                             st.session_state.feedback.append({
                                 "time": datetime.now().isoformat(),
                                 "menu": menu["name"],
                                 "action": action,
+                                "category": menu["category"],
+                                "meal_time": st.session_state.last_context.get("meal_time", ""),
                                 "kcal": kcal,
                                 "protein": protein,
                                 "sodium": sodium,
                             })
                             st.toast(f"{action} 기록 완료")
+                            st.rerun()
 
 # ---------------------------------------------------------
 # Profile
@@ -522,7 +537,7 @@ with tab_profile:
     st.markdown("### 내 정보")
     st.caption("저장된 조건은 추천 때 자동으로 반영됩니다.")
 
-    with st.form("profile_form"):
+    with st.form(f"profile_form_{st.session_state.get('_profile_epoch', 0)}"):
         c1,c2 = st.columns(2)
         with c1:
             nickname = st.text_input("닉네임", value=st.session_state.profile.get("nickname",""))
@@ -567,7 +582,7 @@ with tab_profile:
         st.rerun()
 
     if st.session_state.pop("profile_saved_notice", False):
-        st.success("내 정보를 저장했습니다. '오늘 추천'에서 바로 사용할 수 있습니다.")
+        st.success("내 정보를 적용했습니다. '오늘 추천'에서 바로 사용할 수 있습니다. 기기 보관 상태는 위 저장 메뉴에서 확인하세요.")
 
     if st.session_state.profile:
         p = st.session_state.profile
@@ -592,12 +607,21 @@ with tab_record:
 
     if st.session_state.feedback:
         st.markdown("**최근 기록**")
-        for x in reversed(st.session_state.feedback[-20:]):
-            st.write(f"• {x['time'][:16].replace('T',' ')} · {x['menu']} · {x['action']}")
+        for index in reversed(range(max(0, len(st.session_state.feedback)-20), len(st.session_state.feedback))):
+            x = st.session_state.feedback[index]
+            left, right = st.columns([5,1])
+            left.write(f"• {x['time'][:16].replace('T',' ')} · {x['menu']} · {x.get('category','')} · {x['action']}")
+            if right.button('삭제', key=f'delete_record_{index}'):
+                st.session_state.feedback.pop(index)
+                st.rerun()
+        if st.checkbox('모든 음식 기록을 삭제하겠습니다'):
+            if st.button('음식 기록 전체 삭제'):
+                st.session_state.feedback = []
+                st.rerun()
     else:
         st.info("아직 기록이 없습니다.")
 
-    st.caption("현재 기록은 브라우저 세션에만 유지됩니다. 회원별 장기 저장은 다음 단계에서 DB를 연결합니다.")
+    st.caption("상단의 '내 기기 저장 · 백업'에서 기기 보관과 파일 백업을 관리하세요. 브라우저 데이터 삭제 또는 다른 기기 사용 시 백업으로 복원할 수 있습니다.")
 
 st.divider()
 st.caption("My Meal Bot 1.0 · AI 추천 + 실시간 날씨 + 스토리텔링 + 생활계량 · 실사용 베타")
